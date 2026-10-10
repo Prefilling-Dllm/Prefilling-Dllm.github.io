@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Prefilling-dLLM: a training-free prefill-decode framework that caches chunked prefix KV once and decodes diffusion language models over the top-K chunks.">
+  <meta name="theme-color" content="#f5f2eb">
+  <title>Prefilling-dLLM · Predictive Prefilling for Long-Context Diffusion LMs</title>
+  <link rel="icon" type="image/svg+xml" href="./static/images/mark.svg">
+  <link rel="stylesheet" href="./static/css/site.css?v=2">
+</head>
+<body class="v1">
+  <header class="site-nav">
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="Prefilling-dLLM home">
+        <img src="./static/images/mark.svg" alt="">
+        <span>Prefilling-dLLM</span>
+      </a>
+      <div class="version-switch" aria-label="Paper version">
+        <a href="./" aria-current="page">v1</a>
+        <a href="./v2/">v2</a>
+      </div>
+      <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span></span></button>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#motivation">Motivation</a>
+        <a href="#method">Method</a>
+        <a href="#results">Results</a>
+        <a href="#efficiency">Efficiency</a>
+        <a href="#analysis">Analysis</a>
+        <a href="#cite">Cite</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-inner hero-grid">
+        <div class="hero-copy reveal">
+          <p class="eyebrow">EMNLP 2026</p>
+          <h1><span class="accent">Prefilling</span>-dLLM</h1>
+          <p class="hero-subtitle">Predictive prefilling for long-context inference in diffusion language models.</p>
+          <p class="author-list" aria-label="Authors">
+            Jing Xiong<sup>1</sup>, Qi Han<sup>1</sup>, Shansan Gong<sup>1</sup>, Yunta Hsieh<sup>2</sup>, Boyuan Zheng<sup>2</sup>,
+            Chengyue Wu<sup>1</sup>, Chaofan Tao<sup>1</sup>, Chenyang Zhao<sup>3</sup>, Ngai Wong<sup>1</sup>
+          </p>
+          <p class="affiliations"><sup>1</sup>The University of Hong Kong · <sup>2</sup>University of Michigan, Ann Arbor · <sup>3</sup>LMSYS Org</p>
+          <div class="hero-meta" aria-label="Paper facts">
+            <span>Training-free</span>
+            <span>Dream-7B and UltraLLaDA</span>
+            <span>Contexts up to 128K</span>
+          </div>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://arxiv.org/abs/2606.10537" target="_blank" rel="noopener noreferrer">Read the paper <span aria-hidden="true">↗</span></a>
+            <a class="button button-ghost" href="https://github.com/menik1126/Prefilling-dLLM" target="_blank" rel="noopener noreferrer">Code <span aria-hidden="true">↗</span></a>
+            <a class="button button-subtle" href="./static/files/prefilling-dllm-poster.pdf" target="_blank" rel="noopener">Poster <span aria-hidden="true">↗</span></a>
+            <a class="button button-subtle" href="./v2/">v2: learned routing →</a>
+          </div>
+        </div>
+
+        <div class="hero-visual reveal">
+          <div class="visual-shell">
+            <div class="window-bar" aria-hidden="true">
+              <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+              <span class="window-label">exact match vs. position of the gold document</span>
+            </div>
+            <figure>
+              <img src="./static/images/v1/lim-ours.png" alt="Exact-match accuracy by gold-document position for Prefilling-dLLM (solid lines) and vanilla Dream-7B (dashed lines) at 4K to 32K context">
+              <figcaption class="visual-caption"><strong>Position no longer decides the answer.</strong> Vanilla Dream-7B (dashed) collapses at 16K and 32K unless the evidence sits next to the question. Prefilling-dLLM (solid) stays high wherever it sits.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+
+      <div class="stat-strip reveal" aria-label="Headline results">
+        <div class="stat"><span class="stat-value"><em>9.1–28.0×</em></span><span class="stat-label">end-to-end speedup at 8K–32K context over the Transformers baseline</span></div>
+        <div class="stat"><span class="stat-value">34.59</span><span class="stat-label">LongBench average on Dream-7B, best among dLLM acceleration methods</span></div>
+        <div class="stat"><span class="stat-value">43.62</span><span class="stat-label">InfiniteBench average on Dream-7B; the next method reaches 30.32</span></div>
+        <div class="stat"><span class="stat-value">92.3%</span><span class="stat-label">exact match at 128K context, a 64× extrapolation of a 2K model</span></div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="motivation">
+      <div class="section-inner">
+        <div class="split-grid">
+          <div class="reveal">
+            <p class="section-kicker">01 · Motivation</p>
+            <h2 class="section-title">Every denoising step re-reads a prefix it barely looks at.</h2>
+          </div>
+          <div class="prose reveal">
+            <p>A diffusion language model runs full attention over the prompt and the response at <strong>every</strong> denoising step, so the cost grows with the square of the context and repeats for each step.</p>
+            <p>Two measurements on Dream-7B say most of that work is wasted. Attention from the response to the prefix <strong>decays quickly with distance</strong>, more so in later steps, with a few periodic spikes at segment boundaries. And once the context is extrapolated beyond 4K, accuracy depends on <strong>where the evidence sits</strong>: only documents near the response are found.</p>
+          </div>
+        </div>
+        <div class="figure-grid">
+          <figure class="figure-card card reveal">
+            <img src="./static/images/v1/lim-vanilla.png" alt="Exact match of vanilla Dream-7B by relative position of the gold document, for context lengths from 256 tokens to 32K">
+            <figcaption><strong>Lost in the middle, dLLM style.</strong> Within the native range and at 4K every position is answered. At 8K–32K only positions close to the response survive.</figcaption>
+          </figure>
+          <figure class="figure-card card reveal">
+            <img src="./static/images/v1/attention-decay.png" alt="Average attention weight from response tokens to prefix tokens as a function of distance, at five denoising steps">
+            <figcaption><strong>Attention decays with distance.</strong> Averaged over layers, the weight a response token puts on the prefix falls fast and keeps falling as predictions stabilize; one periodic spike holds about 25% of the mass.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="method">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">02 · Method</p>
+            <h2 class="section-title">Prefill the prefix once. Decode against the few chunks that matter.</h2>
+          </div>
+          <p class="section-intro">Prefilling-dLLM brings prefill-decode disaggregation to diffusion language models without any training: the prefix KV cache is computed once per chunk, ranked, pruned, and reused unchanged by every denoising step.</p>
+        </div>
+
+        <figure class="figure-card card reveal">
+          <img src="./static/images/v1/pipeline.png" alt="Overview of Prefilling-dLLM: chunked prefill with predictive scoring, top-K chunk and top-B token selection, and iterative denoising over the cached KV">
+          <figcaption><strong>Three stages.</strong> Chunks are prefilled independently and scored; the top-K chunks keep their top-B tokens; denoising reuses that static cache.</figcaption>
+        </figure>
+
+        <div class="step-row" aria-label="Stages">
+          <div class="step card reveal"><span class="step-no">STAGE I</span><strong>Prefill</strong><span class="step-text">Split the prefix into N chunks of C tokens, each opened by a BOS token, and run each with the query and a short draft answer in its own bidirectional forward pass.</span></div>
+          <div class="step card reveal"><span class="step-no">STAGE II</span><strong>Sparse attention</strong><span class="step-text">Keep the K best-scoring chunks, and inside each the B tokens that exchange the most attention with the query.</span></div>
+          <div class="step card reveal"><span class="step-no">STAGE III</span><strong>Decode</strong><span class="step-text">Unmask the response over T steps. Only the response tokens are processed; the KV of the selected chunks and of the query is reused as cached.</span></div>
+        </div>
+
+        <div class="complexity card reveal" aria-label="Complexity">
+          <span>O((L<sub>p</sub> + L<sub>q</sub> + L<sub>d</sub>)² · T)</span>
+          <span class="arrow" aria-hidden="true">→</span>
+          <span>O(N(C + L<sub>q</sub> + |m|)² + (L<sub>d</sub>² + K·C) · T)</span>
+          <span class="note">The first term is chunk scoring and cache construction with the query and the draft answer m; the second is denoising over the selected prefix cache. The per-step cost no longer depends on the prefix length L<sub>p</sub>.</span>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card card reveal"><span class="feature-index">/ 01</span><h3>Predictive score</h3><p>A chunk is ranked by how well it predicts the query and a short draft answer: the self-information of the query given the chunk, plus the likelihood of pseudo-labels from one denoising pass. Both are length-normalized and weighted equally.</p><p class="formula">s(c) = s<sub>I</sub>(c) + s<sub>P</sub>(c)</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ 02</span><h3>Inter-chunk sparsity</h3><p>Only the top-K chunks take part in decoding, with K much smaller than N. The main Dream-7B setting keeps 4 chunks of 1,024 tokens whatever the input length.</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ 03</span><h3>Intra-chunk sparsity</h3><p>Inside a selected chunk, tokens are ranked by the attention they exchange with the query in both directions, and the top B = 512 stay in the cache.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="results">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">03 · Results</p>
+            <h2 class="section-title">Sparser attention, better answers.</h2>
+          </div>
+          <p class="section-intro">In autoregressive models sparse attention usually costs quality. Here, dropping most of the prefix raises it. Pick a benchmark and a base model; the underline marks the best acceleration method in each column.</p>
+        </div>
+
+        <div class="table-shell card reveal" data-table="main">
+          <div class="table-toolbar">
+            <div class="tabs" role="tablist" aria-label="Benchmark" data-role="tabs"></div>
+            <span class="table-note"></span>
+          </div>
+          <div class="table-wrap"><table class="results-table" aria-label="Benchmark scores"></table></div>
+          <div class="table-summary" aria-label="Summary of the selected table"></div>
+          <div class="table-caption"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="efficiency">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">04 · Efficiency</p>
+            <h2 class="section-title">The longer the context, the larger the gain.</h2>
+          </div>
+          <p class="section-intro">Decoding always runs over the same compressed budget of about 4K tokens, so its time stays flat while every baseline keeps paying for the full context at each step.</p>
+        </div>
+
+        <div class="split-grid" style="align-items: stretch;">
+          <div class="bar-block card reveal">
+            <h3>Speedup over the Transformers baseline</h3>
+            <p class="bar-sub">LongBench MF-en, Dream-7B, BF16, one A100, 32 generated tokens. Measured end to end: draft generation, chunk scoring, cache construction, data movement and decoding.</p>
+            <ul class="bar-list" aria-label="Speedup by context length">
+              <li class="bar-item is-ours"><span class="bar-name">8K context</span><div class="bar" title="9.1×"><i style="width: 32.5%"></i></div><span class="bar-value">9.1×</span></li>
+              <li class="bar-item is-ours"><span class="bar-name">16K context</span><div class="bar" title="16.1×"><i style="width: 57.5%"></i></div><span class="bar-value">16.1×</span></li>
+              <li class="bar-item is-ours"><span class="bar-name">32K context</span><div class="bar" title="28.0×"><i style="width: 100%"></i></div><span class="bar-value">28.0×</span></li>
+            </ul>
+          </div>
+          <div class="bar-block card reveal">
+            <h3>Where the time goes</h3>
+            <p class="bar-sub">Prefilling is paid once per request; decoding does not grow with the input.</p>
+            <div class="mini-metric"><span>Decode, 8K to 32K</span><strong>≈ 0.86 s, constant</strong></div>
+            <div class="mini-metric"><span>Prefill at 8K / 16K / 32K</span><strong>1.66 / 2.49 / 4.14 s</strong></div>
+            <div class="mini-metric"><span>Split-S decode kernel vs. FlexAttention</span><strong>5.8–10.2× faster</strong></div>
+            <div class="mini-metric"><span>Sparse-dLLM throughput, 8K → 32K</span><strong>16.62 → 3.51 tok/s</strong></div>
+            <div class="mini-metric"><span>Speedup at 32K for 32 / 64 / 128 / 256 output tokens</span><strong>28.0 / 33.5 / 38.7 / 42.1×</strong></div>
+            <div class="mini-metric"><span>Speedup at 32K for batch size 1 / 2 / 4 / 8</span><strong>28.0 / 28.6 / 22.8 / 19.4×</strong></div>
+          </div>
+        </div>
+
+        <div class="figure-grid">
+          <figure class="figure-card card reveal">
+            <img src="./static/images/v1/throughput.png" alt="Throughput in tokens per second at 8K, 16K and 32K context for the Transformers baseline, Fast-dLLM, dKV-Cache, Sparse-dLLM and Prefilling-dLLM">
+            <figcaption><strong>Throughput by context length.</strong> Sparse-dLLM is fastest at 8K through aggressive eviction but degrades with length; Prefilling-dLLM passes it at 16K and 32K.</figcaption>
+          </figure>
+          <figure class="figure-card card reveal">
+            <img src="./static/images/v1/latency-breakdown.png" alt="Latency of Prefilling-dLLM split into prefilling and decoding at 8K, 16K and 32K context">
+            <figcaption><strong>Latency breakdown.</strong> Chunk scoring and cache construction grow with the input; diffusion decoding stays near 0.86 s.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="analysis">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">05 · Analysis</p>
+            <h2 class="section-title">Chunk BOS tokens anchor attention instead of sinking it.</h2>
+          </div>
+          <p class="section-intro">Five findings from the paper explain why selecting chunks removes the positional bias rather than moving it.</p>
+        </div>
+
+        <div class="split-grid" style="align-items: start;">
+          <ol class="finding-list reveal">
+            <li class="finding card"><span class="finding-no">1</span><strong>Sharding the selected KV speeds up decoding.</strong><span class="finding-text">After the top-K chunks are chosen, their cached KV is split into S compute shards that are attended in parallel and merged by a log-sum-exp reduction: 5.8–10.2× lower decode latency.</span></li>
+            <li class="finding card"><span class="finding-no">2</span><strong>Lost-in-the-middle is eliminated.</strong><span class="finding-text">Chunks are chosen by predictive score rather than by proximity, and the periodic attention spikes at chunk BOS tokens become the signal for position-invariant retrieval.</span></li>
+            <li class="finding card"><span class="finding-no">3</span><strong>Chunk BOS tokens act as periodic anchors.</strong><span class="finding-text">They spread attention mass across the context instead of collapsing it onto one token.</span></li>
+            <li class="finding card"><span class="finding-no">4</span><strong>The anchors stay small.</strong><span class="finding-text">All nine chunk BOS tokens together absorb 2.72% of the attention; a single BOS in an autoregressive model takes 20–60%.</span></li>
+            <li class="finding card"><span class="finding-no">5</span><strong>Chunk size trades quality for compute.</strong><span class="finding-text">Under a fixed 4,096-token budget, 256-token chunks hold 92.3% exact match at 128K, while a single 4,096-token chunk degrades sharply beyond 32K.</span></li>
+          </ol>
+          <div class="reveal" style="display: grid; gap: 18px;">
+            <figure class="figure-card card">
+              <img src="./static/images/v1/chunk-size.png" alt="Exact match on the lost-in-the-middle benchmark by chunk size from 256 to 4096 tokens, for contexts from 8K to 128K">
+              <figcaption><strong>Chunk size under a fixed budget.</strong> Top-k × chunk size is held at 4,096 tokens across 8K–128K contexts.</figcaption>
+            </figure>
+            <figure class="figure-card card">
+              <img src="./static/images/v1/attention-sink.png" alt="Left: per-layer share of attention absorbed by the first token, the first five tokens and all chunk BOS tokens. Right: attention profile at layer 14 with chunk BOS positions marked">
+              <figcaption><strong>No attention sink.</strong> The first token absorbs 0.59% of the attention in vanilla Dream and 0.30% in Prefilling-dLLM, averaged over layers.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="next">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">06 · What came next</p>
+            <h2 class="section-title">v1 selects chunks around a frozen model. v2 teaches the model to route.</h2>
+          </div>
+          <p class="section-intro">Prefilling-dLLM fixes its top-K chunks after prefill. The paper lists this among its limitations, and finds static selection stronger for retaining exact evidence than for aggregation-heavy summarization. The follow-up, Prefilling-dLLM v2, moves the selection inside the model.</p>
+        </div>
+        <div class="compare card reveal" aria-label="v1 compared with v2">
+          <div class="compare-row compare-head"><span></span><span>v1 · Prefilling-dLLM</span><span>v2 · Learned routing</span></div>
+          <div class="compare-row"><span>Weights</span><span class="is-here" data-label="v1">Unchanged; training-free</span><span data-label="v2">Continued training with LoRA under the sparse budget</span></div>
+          <div class="compare-row"><span>Who picks the context</span><span class="is-here" data-label="v1">A predictive score computed once at prefill</span><span data-label="v2">Each query, on every fourth layer, from learned chunk summaries</span></div>
+          <div class="compare-row"><span>Chunk</span><span class="is-here" data-label="v1">1,024 tokens, top-4, with a BOS delimiter</span><span data-label="v2">64 positions, top-32, closed by the model's mask token</span></div>
+          <div class="compare-row"><span>Selection</span><span class="is-here" data-label="v1">Static for the whole response</span><span data-label="v2">Per query and per route layer</span></div>
+        </div>
+        <div class="hero-actions">
+          <a class="button button-primary" href="./v2/">Read about v2 →</a>
+          <a class="button button-ghost" href="https://github.com/menik1126/prefilling-dllm/tree/codex/true-batch-prefill" target="_blank" rel="noopener noreferrer">Serving on SGLang <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="cite">
+      <div class="section-inner">
+        <div class="citation-card reveal">
+          <div>
+            <p class="section-kicker">07 · Reference</p>
+            <h2>Cite Prefilling-dLLM</h2>
+            <p>The paper is on <a class="inline-link" href="https://arxiv.org/abs/2606.10537" target="_blank" rel="noopener noreferrer">arXiv</a>.</p>
+          </div>
+          <a class="button button-primary" href="https://arxiv.org/abs/2606.10537" target="_blank" rel="noopener noreferrer">Open on arXiv</a>
+        </div>
+        <pre class="bibtex reveal"><button id="copy-bibtex" class="copy-button" type="button">Copy</button><code id="bibtex-source">@inproceedings{xiong2026prefillingdllm,
+  title     = {Prefilling-dLLM: Predictive Prefilling for Long-Context Inference in Diffusion Language Models},
+  author    = {Jing Xiong and Qi Han and Shansan Gong and Yunta Hsieh and Boyuan Zheng and Chengyue Wu and Chaofan Tao and Chenyang Zhao and Ngai Wong},
+  booktitle = {Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing},
+  year      = {2026},
+  note      = {arXiv:2606.10537}
+}</code></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>Prefilling-dLLM · prefill once, decode over the chunks that matter</span>
+      <span><a href="https://arxiv.org/abs/2606.10537" target="_blank" rel="noopener noreferrer">Paper</a> · <a href="https://github.com/menik1126/Prefilling-dLLM" target="_blank" rel="noopener noreferrer">Code</a> · <a href="./v2/">v2</a></span>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      var longbench = ['NarrativeQA', 'Qasper', 'MF-en', 'HotpotQA', '2WikiMQA', 'Musique', 'GovReport', 'QMSum', 'MultiNews', 'SAMSum', 'TREC', 'TriviaQA', 'PCount', 'PRe', 'LCC', 'RB-P', 'Avg'];
+      var infinite = ['Passkey', 'Number', 'KV', 'LongBook', 'Math', 'Code', 'Avg'];
+      window.PAGE = { tables: { main: { tabs: [
+        {
+          label: 'LongBench · Dream-7B', columns: longbench, digits: 2, lastIsAverage: true,
+          note: 'Dream-v0-Base-7B · 2K native, YaRN to 128K',
+          groups: [
+            { label: 'Without acceleration', rows: [
+              { name: 'YaRN (128K)', values: [7.08, 16.33, 32.37, 9.30, 10.75, 6.89, 5.25, 14.88, 8.09, 29.00, 26.00, 55.04, 0.68, 7.40, 26.28, 31.44, 17.92] },
+              { name: 'Vanilla (2K)', values: [20.27, 19.33, 40.50, 29.38, 20.07, 15.06, 5.22, 17.76, 8.42, 33.77, 60.00, 81.87, 0.50, 16.50, 46.95, 41.99, 28.60] }
+            ] },
+            { label: 'Acceleration methods', rank: true, rows: [
+              { name: 'Fast-dLLM', values: [9.70, 18.03, 36.28, 11.32, 11.94, 7.07, 5.24, 13.32, 7.88, 31.09, 46.00, 70.61, 0.27, 3.50, 24.62, 29.23, 20.38] },
+              { name: 'Fast-dLLM v2', values: [27.50, 33.25, 49.76, 46.00, 35.92, 22.90, 4.28, 17.53, 6.20, 31.38, 43.50, 78.28, 4.00, 88.50, 10.41, 7.12, 31.66] },
+              { name: 'Sparse-dLLM', values: [3.19, 9.45, 20.25, 7.04, 6.11, 4.99, 5.27, 5.92, 8.13, 13.04, 0.00, 10.96, 0.23, 2.62, 17.01, 22.46, 8.54] },
+              { name: 'dKV-Cache', values: [3.57, 6.60, 18.33, 7.02, 6.34, 4.44, 5.32, 6.07, 7.84, 7.71, 0.00, 7.17, 0.47, 1.60, 14.74, 19.92, 7.32] },
+              { name: 'Ours (inter-chunk)', ours: true, values: [12.14, 18.28, 38.26, 15.32, 16.13, 9.75, 5.40, 17.74, 7.70, 29.24, 46.00, 70.68, 0.00, 13.75, 21.49, 30.23, 22.01] },
+              { name: 'Ours (inter + intra)', ours: true, values: [19.90, 26.72, 46.40, 36.22, 22.10, 19.96, 5.58, 17.52, 8.02, 32.96, 64.50, 92.11, 1.54, 76.02, 25.90, 57.98, 34.59] }
+            ] }
+          ],
+          summary: [['34.59', 'average with inter + intra sparsity'], ['+2.93', 'over Fast-dLLM v2'], ['57.98 vs 41.99', 'RB-P against vanilla']],
+          caption: 'LongBench, 16 tasks. Adding intra-chunk sparsity lifts the average from 22.01 to 34.59 while computing less.'
+        },
+        {
+          label: 'LongBench · UltraLLaDA', columns: longbench, digits: 2, lastIsAverage: true,
+          note: 'UltraLLaDA · native 128K',
+          groups: [
+            { label: 'Without acceleration', rows: [
+              { name: 'Vanilla (128K)', values: [17.04, 22.71, 33.20, 15.98, 16.71, 12.20, 5.38, 17.30, 8.00, 37.10, 79.50, 90.53, 1.48, 96.08, 67.77, 54.97, 36.00] }
+            ] },
+            { label: 'Acceleration methods', rank: true, rows: [
+              { name: 'Fast-dLLM', values: [22.03, 21.58, 37.31, 17.31, 16.97, 11.04, 5.30, 17.71, 8.20, 33.18, 79.50, 90.53, 1.36, 94.47, 66.08, 53.10, 35.98] },
+              { name: 'Sparse-dLLM', values: [21.30, 23.16, 35.43, 19.08, 19.27, 15.39, 5.35, 17.51, 8.26, 35.37, 77.50, 91.43, 0.73, 97.58, 66.89, 52.57, 36.68] },
+              { name: 'dKV-Cache', values: [17.86, 22.36, 32.99, 17.89, 18.39, 14.25, 5.41, 17.18, 8.04, 36.30, 80.50, 90.53, 1.48, 94.88, 67.96, 54.61, 36.29] },
+              { name: 'Ours (inter-chunk)', ours: true, values: [12.27, 22.40, 39.94, 22.21, 23.48, 9.64, 5.33, 17.85, 8.48, 34.33, 67.00, 88.16, 2.38, 90.91, 65.10, 62.67, 35.64] },
+              { name: 'Ours (inter + intra)', ours: true, values: [17.07, 24.71, 36.07, 21.57, 17.87, 14.30, 5.21, 18.12, 8.46, 34.43, 77.50, 92.50, 2.50, 96.91, 66.92, 58.20, 37.02] }
+            ] }
+          ],
+          summary: [['37.02', 'average with inter + intra sparsity'], ['9 of 16', 'tasks where one of the two variants is best'], ['39.94 vs 37.31', 'MF-en against the best baseline']],
+          caption: 'On a model that is natively 128K the margins are smaller, and the two variants together still lead on 9 of the 16 tasks.'
+        },
+        {
+          label: 'InfiniteBench · Dream-7B', columns: infinite, digits: 2, lastIsAverage: true,
+          note: 'contexts beyond 128K tokens · accuracy (%)',
+          groups: [
+            { label: 'Without acceleration', rows: [
+              { name: 'YaRN (128K)', values: [0.00, 0.00, 0.00, 6.11, 3.43, 7.87, 2.90] },
+              { name: 'Vanilla (2K)', values: [1.69, 2.54, 0.00, 35.81, 34.57, 0.00, 12.44] }
+            ] },
+            { label: 'Acceleration methods', rank: true, rows: [
+              { name: 'Fast-dLLM', values: [0.17, 3.05, 0.00, 8.73, 3.43, 8.38, 3.96] },
+              { name: 'Fast-dLLM v2', values: [27.12, 27.12, 0.00, 57.21, 24.29, 46.19, 30.32] },
+              { name: 'Sparse-dLLM', values: [39.32, 25.59, 0.00, 1.31, 3.43, 3.81, 12.24] },
+              { name: 'dKV-Cache', values: [0.51, 0.00, 0.00, 5.68, 4.00, 3.05, 2.21] },
+              { name: 'Ours (inter + intra)', ours: true, values: [95.42, 70.00, 0.00, 53.71, 24.57, 18.02, 43.62] }
+            ] }
+          ],
+          summary: [['43.62', 'average accuracy'], ['+13.30', 'over Fast-dLLM v2'], ['95.42', 'passkey retrieval']],
+          caption: 'InfiniteBench. The gain comes mostly from retrieval: passkey 95.42 and number 70.00. Every dLLM method scores zero on KV retrieval; long-context autoregressive baselines on LLaMA3-8B reach only 9.40 and 3.60.'
+        },
+        {
+          label: 'InfiniteBench · UltraLLaDA', columns: infinite, digits: 2, lastIsAverage: true,
+          note: 'contexts beyond 128K tokens · accuracy (%)',
+          groups: [
+            { label: 'Without acceleration', rows: [
+              { name: 'Vanilla (128K)', values: [12.99, 2.45, 0.00, 8.86, 10.43, 0.00, 5.79] }
+            ] },
+            { label: 'Acceleration methods', rank: true, rows: [
+              { name: 'Fast-dLLM', values: [16.10, 6.61, 0.00, 7.86, 14.29, 0.25, 7.52] },
+              { name: 'Sparse-dLLM', values: [8.14, 2.37, 0.00, 5.24, 7.43, 1.52, 4.12] },
+              { name: 'dKV-Cache', values: [5.82, 6.75, 0.00, 8.30, 16.00, 0.00, 6.15] },
+              { name: 'Ours (inter + intra)', ours: true, values: [13.22, 30.00, 0.00, 14.41, 26.00, 1.52, 14.19] }
+            ] }
+          ],
+          summary: [['14.19', 'average accuracy'], ['+6.67', 'over Fast-dLLM'], ['30.00', 'number retrieval']],
+          caption: 'InfiniteBench on UltraLLaDA.'
+        },
+        {
+          label: 'MF-en · equal budgets', columns: ['Selected tokens', 'MF-en'], digits: 2, rowHeader: 'Context selection',
+          note: 'LongBench MF-en · 150 examples',
+          groups: [
+            { label: 'Dream-7B', rank: true, rows: [
+              { name: 'BM25', values: ['2K', 41.28] },
+              { name: 'BM25', values: ['4K', 38.41] },
+              { name: 'Ours (inter-chunk)', ours: true, values: ['4K', 38.26] },
+              { name: 'Ours (inter + intra)', ours: true, values: ['2K', 46.40] }
+            ] },
+            { label: 'UltraLLaDA', rank: true, rows: [
+              { name: 'BM25', values: ['2K', 33.96] },
+              { name: 'BM25', values: ['4K', 35.13] },
+              { name: 'Ours (inter-chunk)', ours: true, values: ['2K', 39.94] },
+              { name: 'Ours (inter + intra)', ours: true, values: ['4K', 36.07] }
+            ] }
+          ],
+          caption: 'Predictive selection against BM25 retrieval at matched selected-token budgets, with the same base model generating. It wins clearly with intra-chunk sparsity on Dream-7B and with inter-chunk selection on UltraLLaDA; BM25 stays competitive elsewhere.'
+        },
+        {
+          label: 'SCBench', columns: ['Overall acc.', 'Overall F1', 'Passkey acc.', 'Summary F1'], digits: 4,
+          note: 'Summary-with-Needles · 8K selected context tokens',
+          groups: [
+            { rank: true, rows: [
+              { name: 'BM25 + Vanilla', values: [0.2875, 0.4490, 0.5750, 0.3230] },
+              { name: 'BM25 + Fast-dLLM v1', values: [0.3125, 0.5074, 0.6250, 0.3898] },
+              { name: 'BM25 + dKV-Cache', values: [0.3000, 0.4746, 0.6000, 0.3492] },
+              { name: 'BM25 + Sparse-dLLM', values: [0.2875, 0.4477, 0.5750, 0.3204] },
+              { name: 'Ours', ours: true, values: [0.3250, 0.4996, 0.6500, 0.3492] }
+            ] }
+          ],
+          caption: 'A task that needs both a summary and needle retrieval. Ours is best on overall and passkey accuracy; BM25 + Fast-dLLM v1 has the higher F1 scores, so static selection is weaker when the answer aggregates the whole document.'
+        }
+      ] } } };
+    })();
+  </script>
+  <script src="./static/js/site.js?v=2"></script>
+</body>
+</html>

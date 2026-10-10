@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Prefilling-dLLM v2: continued training that teaches a diffusion language model to route long contexts with its native mask token.">
+  <meta name="theme-color" content="#f5f2eb">
+  <title>Prefilling-dLLM v2 · Learned routing for long-context diffusion LMs</title>
+  <link rel="icon" type="image/svg+xml" href="../static/images/mark.svg">
+  <link rel="stylesheet" href="../static/css/site.css?v=2">
+</head>
+<body class="v2">
+  <header class="site-nav">
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="Prefilling-dLLM v2 home">
+        <img src="../static/images/mark.svg" alt="">
+        <span>Prefilling-dLLM</span>
+      </a>
+      <div class="version-switch" aria-label="Paper version">
+        <a href="../">v1</a>
+        <a href="./" aria-current="page">v2</a>
+      </div>
+      <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span></span></button>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#idea">Idea</a>
+        <a href="#method">Method</a>
+        <a href="#results">Results</a>
+        <a href="#probes">Probes</a>
+        <a href="#latency">Latency</a>
+        <a href="#cite">Cite</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-inner hero-grid">
+        <div class="hero-copy reveal">
+          <p class="eyebrow">Version 2 · Learned routing</p>
+          <h1>Prefilling-dLLM <span class="accent">v2</span></h1>
+          <p class="hero-subtitle">A diffusion language model that learns to route long contexts with its own mask token.</p>
+          <div class="hero-meta" aria-label="Paper facts">
+            <span>Continued training from Dream-v0-Base-7B</span>
+            <span>Trained at 16K, evaluated to 128K</span>
+            <span>RULER and LongBench</span>
+          </div>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#results">Explore results</a>
+            <a class="button button-ghost" href="../">← v1: Prefilling-dLLM</a>
+            <span class="button button-subtle" aria-disabled="true">Paper and code coming soon</span>
+          </div>
+        </div>
+
+        <div class="hero-visual reveal">
+          <div class="visual-shell">
+            <div class="window-bar" aria-hidden="true">
+              <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
+              <span class="window-label">mean accuracy on three RULER probes</span>
+            </div>
+            <figure>
+              <img src="../static/images/v2/mean-accuracy.png" alt="Mean accuracy of SWA, DSA, NSA and ours on three RULER probes at 16K, 32K, 64K and 128K context">
+              <figcaption class="visual-caption"><strong>Ahead of the other sparse methods at every length.</strong> Mean accuracy over single-needle, multi-key and variable tracking, with the YaRN factor scaled to the evaluation length.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+
+      <div class="stat-strip reveal" aria-label="Headline results">
+        <div class="stat"><span class="stat-value">53.8 → 47.7</span><span class="stat-label">mean RULER accuracy from 16K to 128K context</span></div>
+        <div class="stat"><span class="stat-value"><em>+11.1</em> / <em>+7.4</em></span><span class="stat-label">points over NSA, the next sparse model, at 16K and 128K</span></div>
+        <div class="stat"><span class="stat-value">95.0</span><span class="stat-label">single-needle accuracy at 128K; NSA reaches 83.0</span></div>
+        <div class="stat"><span class="stat-value"><em>172×</em></span><span class="stat-label">faster decoding than full dense attention at 128K</span></div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="idea">
+      <div class="section-inner">
+        <div class="split-grid" style="align-items: start;">
+          <div class="reveal">
+            <p class="section-kicker">01 · The idea</p>
+            <h2 class="section-title">A mask token is already trained to absorb context.</h2>
+            <div class="prose" style="margin-top: 22px;">
+              <p>Sparsifying a diffusion model only at inference leaves its dense weights unchanged and merely hides tokens. v2 instead <strong>continues training under the sparse budget</strong>, and gives the model a place to write what a chunk contains.</p>
+              <p>That place is the model's native mask token. One mask closes every chunk, and a learned role offset marks it as a routing slot rather than a token to predict. Its query pools the chunk into a summary; every other query scores those summaries and reads the chunks it ranks highest.</p>
+            </div>
+          </div>
+
+          <div class="visibility card reveal" aria-label="What a query can see under each sparse method">
+            <div class="vis-controls" role="group" aria-label="Sparse attention method">
+              <button class="tab" type="button" data-method="swa" data-note="SWA: a bidirectional sliding window around the query and nothing else. A needle outside the window cannot be reached.">SWA</button>
+              <button class="tab" type="button" data-method="nsa" data-note="NSA: every chunk is compressed into a summary; the query reads the local window plus whole selected chunks.">NSA</button>
+              <button class="tab" type="button" data-method="dsa" data-note="DSA: a lightweight indexer picks individual tokens scattered over the context.">DSA</button>
+              <button class="tab" type="button" data-method="ours" data-note="Ours: the last cell of every chunk is a mask (M) that summarizes it. The query reads its local window plus the content of the chunks whose masks score highest.">Ours</button>
+            </div>
+            <div class="vis-rows">
+              <div class="vis-row" data-method="swa"><span class="vis-name">SWA</span><div class="vis-cells">
+                <span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span>
+                <span class="vis-gap">…</span><span class="vis-cell local"></span><span class="vis-cell local query"></span><span class="vis-cell local"></span><span class="vis-gap">…</span>
+                <span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span>
+              </div></div>
+              <div class="vis-row" data-method="nsa"><span class="vis-name">NSA</span><div class="vis-cells">
+                <span class="vis-cell selected summary"></span><span class="vis-cell selected summary"></span><span class="vis-cell selected summary"></span><span class="vis-cell summary"></span><span class="vis-cell summary"></span><span class="vis-cell summary"></span>
+                <span class="vis-gap">…</span><span class="vis-cell local"></span><span class="vis-cell local query"></span><span class="vis-cell local"></span><span class="vis-gap">…</span>
+                <span class="vis-cell summary"></span><span class="vis-cell summary"></span><span class="vis-cell summary"></span><span class="vis-cell selected summary"></span><span class="vis-cell selected summary"></span><span class="vis-cell selected summary"></span>
+              </div></div>
+              <div class="vis-row" data-method="dsa"><span class="vis-name">DSA</span><div class="vis-cells">
+                <span class="vis-cell selected"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell selected"></span>
+                <span class="vis-gap">…</span><span class="vis-cell local"></span><span class="vis-cell local query"></span><span class="vis-cell local"></span><span class="vis-gap">…</span>
+                <span class="vis-cell"></span><span class="vis-cell selected"></span><span class="vis-cell"></span><span class="vis-cell selected"></span><span class="vis-cell"></span><span class="vis-cell"></span>
+              </div></div>
+              <div class="vis-row" data-method="ours"><span class="vis-name">Ours</span><div class="vis-cells">
+                <span class="vis-cell selected"></span><span class="vis-cell selected"></span><span class="vis-cell route"></span><span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell route"></span>
+                <span class="vis-gap">…</span><span class="vis-cell local"></span><span class="vis-cell local query"></span><span class="vis-cell local"></span><span class="vis-gap">…</span>
+                <span class="vis-cell"></span><span class="vis-cell"></span><span class="vis-cell route"></span><span class="vis-cell selected"></span><span class="vis-cell selected"></span><span class="vis-cell route"></span>
+              </div></div>
+            </div>
+            <div class="vis-legend">
+              <span><i style="background:#8fc5bf"></i>local window</span>
+              <span><i style="background:#e2a13a"></i>selected</span>
+              <span><i style="background:#b0555b"></i>routing mask</span>
+              <span><i style="background:var(--band); box-shadow: inset 0 3px 0 #6f6a5f"></i>chunk summary</span>
+            </div>
+            <p class="vis-note" aria-live="polite"></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="method">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">02 · Method</p>
+            <h2 class="section-title">Three sliding-window layers, then one route layer.</h2>
+          </div>
+          <p class="section-intro">The window layers mix context locally in both directions. Every fourth layer is where long-range evidence may enter, so the learned route is the only long-range path the model has.</p>
+        </div>
+
+        <figure class="figure-card card reveal">
+          <img src="../static/images/v2/route-layer.png" alt="Computation on a route layer: the routing mask pools its chunk into a summary, queries select the top-K chunks, and attention mass is split between the selected chunks and the local window">
+          <figcaption><strong>A route layer.</strong> A chunk is 63 content tokens and one routing mask. The mask pools the content keys into a summary; a content query scores the summaries, keeps the top K chunks, and splits its attention mass between them and its local window.</figcaption>
+        </figure>
+
+        <div class="feature-grid">
+          <article class="feature-card card reveal"><span class="feature-index">/ 01</span><h3>Routing mask</h3><p>The mask at the end of a chunk keeps its embedding and gets one learned offset at the input. Its query runs a softmax over the chunk's content keys, and the weighted sum is the chunk summary.</p><p class="formula">s<sub>c</sub> = Σ<sub>j</sub> α<sub>c,j</sub> k<sub>j</sub></p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ 02</span><h3>Top-K selection</h3><p>A rank-64 residual calibrates the scoring query. The score of a chunk is the query's agreement with its summary plus the entropy of the pooling weights; query heads that share a key head choose chunks together.</p><p class="formula">u<sub>i,c</sub> = q̂<sub>i</sub>ᵀs<sub>c</sub>/√d + H(α<sub>c</sub>)</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ 03</span><h3>Attention mass</h3><p>The scores of the selected chunks and the log-sum-exp of the local window are normalized in one partition. A second softmax spreads each chunk's share over its content tokens.</p><p class="formula">o<sub>i</sub> = Σ<sub>c</sub> w<sub>i,c</sub> Σ<sub>j</sub> a<sub>i,j</sub> v<sub>j</sub> + w<sub>i</sub><sup>loc</sup> o<sub>i</sub><sup>loc</sup></p></article>
+        </div>
+
+        <div class="table-shell card reveal" style="margin-top: 28px;">
+          <div class="table-toolbar"><strong>Matched key budget, about 2,560 keys per layer</strong><span class="table-note">28 layers · route layers 3, 7, 11, 15, 19, 23, 27</span></div>
+          <div class="table-wrap">
+            <table class="results-table" aria-label="Layer contracts of the compared variants">
+              <thead><tr><th>Variant</th><th>Every 4th layer</th><th>Other 21 layers</th></tr></thead>
+              <tbody>
+                <tr class="ours"><td>Ours</td><td>window radius 256 + 32 chunks of 64</td><td>window radius 1,280</td></tr>
+                <tr><td>NSA</td><td>window radius 128 + 32 blocks of 64 + one summary per block</td><td>window radius 1,280</td></tr>
+                <tr><td>DSA</td><td>2,560 tokens chosen by an indexer</td><td>window radius 1,280</td></tr>
+                <tr><td>SWA</td><td>window radius 1,280</td><td>window radius 1,280</td></tr>
+                <tr><td>Hybrid dense</td><td>all keys</td><td>window radius 1,280</td></tr>
+                <tr><td>Full dense</td><td>all keys</td><td>all keys</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-caption">All variants start from the same dense 16K checkpoint and train for 1,000 steps with rank-16 LoRA on the attention projections; the base weights stay frozen.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="results">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">03 · Results</p>
+            <h2 class="section-title">Trained at 16K, still routing at 128K.</h2>
+          </div>
+          <p class="section-intro">Three RULER probes, 100 examples each. Pick a length, and whether the YaRN factor is scaled to that length or held at the training value of 8. The underline marks the best sparse model.</p>
+        </div>
+
+        <div class="table-shell card reveal" data-table="ruler">
+          <div class="table-toolbar">
+            <div class="tabs" role="tablist" aria-label="Benchmark" data-role="tabs"></div>
+            <div class="tabs" role="tablist" aria-label="YaRN factor" data-role="views"></div>
+          </div>
+          <div class="table-wrap"><table class="results-table" aria-label="Accuracy by method"></table></div>
+          <div class="table-summary" aria-label="Summary of the selected table"></div>
+          <div class="table-caption"></div>
+        </div>
+
+        <div class="feature-grid two">
+          <article class="feature-card card reveal"><span class="feature-index">/ where it wins</span><h3>Localized evidence</h3><p>The margin is carried by single-needle retrieval: 100.0, 99.0, 98.0 and 95.0 from 16K to 128K, against 81.0, 87.0, 86.0 and 83.0 for NSA. With the factor held at 8 it stays at 99.0 or above while full dense falls to 94.0 at 64K.</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ where it does not</span><h3>Scattered evidence and coverage</h3><p>Multi-key and variable tracking stay far below full dense, because one missed chunk fails the example. On LongBench the order reverses: the all-window model averages 30.9, ours 25.4, full dense 44.3. A wide window beats a few selected chunks when most of the document matters.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="probes">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">04 · Routing-mask probes</p>
+            <h2 class="section-title">The mask holds a summary the model actually reads.</h2>
+          </div>
+          <p class="section-intro">Two interventions on 16K single-needle retrieval, compared with two other slots trained the same way: the end-of-sequence token and a new learned token.</p>
+        </div>
+
+        <div class="split-grid" style="align-items: stretch;">
+          <div class="bar-block card reveal">
+            <h3>Shuffle the summaries across chunks</h3>
+            <p class="bar-sub">The text stays in place; only the binding between a summary and its chunk is broken.</p>
+            <ul class="bar-list" aria-label="Single-needle accuracy after shuffling summaries">
+              <li class="bar-item is-ours"><span class="bar-name">Clean</span><div class="bar" title="100.0"><i style="width: 100%"></i></div><span class="bar-value">100.0</span></li>
+              <li class="bar-item is-ours"><span class="bar-name">Shuffled</span><div class="bar" title="12.0"><i style="width: 12%"></i></div><span class="bar-value">12.0</span></li>
+            </ul>
+            <p class="bar-sub" style="margin: 16px 0 0;">The needle is still in the text, and it is lost.</p>
+          </div>
+          <div class="bar-block card reveal">
+            <h3>Move the needle to another chunk</h3>
+            <p class="bar-sub">Routing slots stay where they are; the summary must be formed again from the new content.</p>
+            <ul class="bar-list" aria-label="Single-needle accuracy after moving the needle">
+              <li class="bar-item is-ours"><span class="bar-name">Native mask</span><div class="bar" title="68.0"><i style="width: 68%"></i></div><span class="bar-value">68.0</span></li>
+              <li class="bar-item"><span class="bar-name">New token</span><div class="bar" title="0.0"><i style="width: 0%"></i></div><span class="bar-value">0.0</span></li>
+              <li class="bar-item"><span class="bar-name">EOS</span><div class="bar" title="0.0"><i style="width: 0%"></i></div><span class="bar-value">0.0</span></li>
+            </ul>
+            <div class="bar-legend"><span><i class="ours"></i>ours (native mask)</span><span><i></i>other routing tokens</span></div>
+          </div>
+        </div>
+
+        <div class="figure-grid">
+          <figure class="figure-card card reveal">
+            <img src="../static/images/v2/summary-cosine.png" alt="Cosine similarity between each chunk and each routing slot for the native mask, a new token and EOS, on the clean probe and after shuffling summaries">
+            <figcaption><strong>Summaries agree with their own chunk.</strong> On the clean probe the cosine concentrates on the diagonal; permuting the summaries removes it.</figcaption>
+          </figure>
+          <figure class="figure-card card reveal">
+            <img src="../static/images/v2/training-loss.png" alt="Training loss over 1000 continued-training steps for NSA, DSA, SWA, ours, hybrid dense and full dense">
+            <figcaption><strong>Continued training, six variants.</strong> Trailing 25-step average of the training objective. DSA trains only its indexer for the first 100 steps.</figcaption>
+          </figure>
+        </div>
+
+        <div class="table-shell card reveal" data-table="ablation" style="margin-top: 18px;">
+          <div class="table-toolbar">
+            <div class="tabs" role="tablist" aria-label="Ablation" data-role="tabs"></div>
+            <span class="table-note"></span>
+          </div>
+          <div class="table-wrap"><table class="results-table" aria-label="Ablation results"></table></div>
+          <div class="table-caption"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="latency">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">05 · Latency</p>
+            <h2 class="section-title">A fixed remote budget keeps decoding flat as the context grows.</h2>
+          </div>
+          <p class="section-intro">Median of ten trials on one synthetic sequence with 128 masked answer tokens, under the same cached decoder for every model.</p>
+        </div>
+        <div class="split-grid" style="align-items: stretch;">
+          <div class="bar-block card reveal">
+            <h3>At 128K context</h3>
+            <p class="bar-sub">Full dense / hybrid dense / ours.</p>
+            <div class="mini-metric"><span>Prefill</span><strong>22,338 / 9,034 / 7,280 ms</strong></div>
+            <div class="mini-metric"><span>Decode per token</span><strong>1,190 / 233.4 / 6.91 ms</strong></div>
+            <div class="mini-metric"><span>Ours against full dense</span><strong>3.1× prefill · 172× decode</strong></div>
+            <div class="mini-metric"><span>Our decode, 16K to 128K</span><strong>3.69–10.55 ms per token</strong></div>
+            <p class="bar-sub" style="margin: 14px 0 0;">The prefill gain is much smaller than the decode gain: that pass still reads every token. At 16K hybrid dense decodes faster than ours, 5.90 against 10.55 ms.</p>
+          </div>
+          <figure class="figure-card card reveal">
+            <img src="../static/images/v2/latency.png" alt="Prefill latency and decode latency per token at 16K, 32K, 64K and 128K for full dense, hybrid dense and ours, on logarithmic axes">
+            <figcaption><strong>Prefill and decode latency.</strong> Both axes are logarithmic; the number above a bar is that latency divided by ours.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="series">
+      <div class="section-inner">
+        <div class="section-heading-row reveal">
+          <div>
+            <p class="section-kicker">06 · From v1 to v2</p>
+            <h2 class="section-title">From choosing chunks for the model to a model that chooses.</h2>
+          </div>
+          <p class="section-intro">Prefilling-dLLM selected a handful of chunks once, around frozen weights. v2 keeps the idea of reading a few chunks and makes the choice learned, per query and per layer.</p>
+        </div>
+        <div class="compare card reveal" aria-label="v1 compared with v2">
+          <div class="compare-row compare-head"><span></span><span>v1 · Prefilling-dLLM</span><span>v2 · Learned routing</span></div>
+          <div class="compare-row"><span>Weights</span><span data-label="v1">Unchanged; training-free</span><span class="is-here" data-label="v2">Continued training with LoRA under the sparse budget</span></div>
+          <div class="compare-row"><span>Who picks the context</span><span data-label="v1">A predictive score computed once at prefill</span><span class="is-here" data-label="v2">Each query, on every fourth layer, from learned chunk summaries</span></div>
+          <div class="compare-row"><span>Chunk</span><span data-label="v1">1,024 tokens, top-4, with a BOS delimiter</span><span class="is-here" data-label="v2">64 positions, top-32, closed by the model's mask token</span></div>
+          <div class="compare-row"><span>Selection</span><span data-label="v1">Static for the whole response</span><span class="is-here" data-label="v2">Per query and per route layer</span></div>
+        </div>
+        <div class="hero-actions">
+          <a class="button button-ghost" href="../">← Read about v1</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-band" id="cite">
+      <div class="section-inner">
+        <div class="citation-card reveal">
+          <div>
+            <p class="section-kicker">07 · Reference</p>
+            <h2>Citation</h2>
+            <p>The citation for v2 will be added here. Until then, please cite <a class="inline-link" href="../#cite">Prefilling-dLLM</a>.</p>
+          </div>
+          <a class="button button-primary" href="../#cite">Cite v1</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>Prefilling-dLLM v2 · learned routing for long contexts</span>
+      <span><a href="../">v1</a> · <a href="#results">Results</a></span>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      var probes = ['Single-needle', 'Multi-key', 'Var. tracking', 'Avg'];
+      function ruler(dense, sparse, summary, caption) {
+        return {
+          groups: [
+            { label: 'Dense', rows: [
+              { name: 'Full dense', values: dense[0] },
+              { name: 'Hybrid dense', values: dense[1] }
+            ] },
+            { label: 'Sparse, matched key budget', rank: true, rows: [
+              { name: 'SWA', values: sparse[0] },
+              { name: 'NSA', values: sparse[1] },
+              { name: 'DSA', values: sparse[2] },
+              { name: 'Ours', ours: true, values: sparse[3] }
+            ] }
+          ],
+          summary: summary,
+          caption: caption
+        };
+      }
+      var sameAt16 = ruler(
+        [[100.0, 100.0, 91.7, 97.2], [99.0, 87.5, 67.3, 84.6]],
+        [[5.0, 5.0, 4.7, 4.9], [81.0, 32.0, 15.0, 42.7], [9.0, 15.5, 12.7, 12.4], [100.0, 42.0, 19.3, 53.8]],
+        [['53.8', 'our mean'], ['+11.1', 'over NSA'], ['100.0', 'single-needle']],
+        '16K is the training length, where the factor is 8 under both settings.'
+      );
+      var longbench = ['NarrativeQA', 'Qasper', 'MF-en', 'HotpotQA', '2WikiMQA', 'Musique', 'GovReport', 'QMSum', 'MultiNews', 'SAMSum', 'TREC', 'TriviaQA', 'PCount', 'PRe', 'LCC', 'RB-P', 'Avg'];
+      window.PAGE = { tables: {
+        ruler: {
+          defaultView: 'scaled',
+          views: [{ key: 'scaled', label: 'YaRN scaled to length' }, { key: 'fixed', label: 'YaRN fixed at 8' }],
+          tabs: [
+            { label: '16K', columns: probes, lastIsAverage: true, views: { scaled: sameAt16, fixed: sameAt16 } },
+            { label: '32K', columns: probes, lastIsAverage: true, views: {
+              scaled: ruler(
+                [[100.0, 99.5, 80.0, 93.2], [99.0, 80.0, 69.0, 82.7]],
+                [[2.0, 1.0, 4.3, 2.4], [87.0, 30.5, 12.3, 43.3], [7.0, 6.0, 4.7, 5.9], [99.0, 47.5, 17.7, 54.7]],
+                [['54.7', 'our mean'], ['+11.4', 'over NSA'], ['99.0', 'single-needle']],
+                'Twice the training length, YaRN factor 16.'),
+              fixed: ruler(
+                [[100.0, 96.5, 75.7, 90.7], [100.0, 81.5, 67.7, 83.1]],
+                [[2.0, 1.0, 4.3, 2.4], [84.0, 32.0, 10.0, 42.0], [6.0, 7.0, 4.0, 5.7], [99.0, 35.0, 18.0, 50.7]],
+                [['50.7', 'our mean'], ['+8.7', 'over NSA'], ['99.0', 'single-needle']],
+                'Twice the training length with the training factor: multi-key drops from 47.5 to 35.0.')
+            } },
+            { label: '64K', columns: probes, lastIsAverage: true, views: {
+              scaled: ruler(
+                [[100.0, 97.5, 69.3, 88.9], [98.0, 81.5, 62.7, 80.7]],
+                [[3.0, 2.0, 0.7, 1.9], [86.0, 22.0, 9.0, 39.0], [3.0, 5.0, 2.7, 3.6], [98.0, 45.0, 14.0, 52.3]],
+                [['52.3', 'our mean'], ['+13.3', 'over NSA'], ['98.0', 'single-needle']],
+                'Four times the training length, YaRN factor 32.'),
+              fixed: ruler(
+                [[94.0, 68.5, 40.7, 67.7], [70.0, 73.5, 59.3, 67.6]],
+                [[3.0, 2.5, 1.0, 2.2], [79.0, 16.0, 9.3, 34.8], [5.0, 4.0, 2.0, 3.7], [100.0, 27.0, 17.0, 48.0]],
+                [['48.0', 'our mean'], ['+13.2', 'over NSA'], ['100.0 vs 94.0', 'single-needle against full dense']],
+                'With the factor held at 8, ours keeps single-needle at 100.0 while full dense falls to 94.0.')
+            } },
+            { label: '128K', columns: probes, lastIsAverage: true, views: {
+              scaled: ruler(
+                [[100.0, 100.0, 62.3, 87.4], [85.0, 83.5, 53.7, 74.1]],
+                [[2.0, 0.0, 1.0, 1.0], [83.0, 29.0, 9.0, 40.3], [2.0, 1.5, 2.0, 1.8], [95.0, 37.5, 10.7, 47.7]],
+                [['47.7', 'our mean'], ['+7.4', 'over NSA'], ['95.0 vs 85.0', 'single-needle against hybrid dense']],
+                'Eight times the training length, YaRN factor 64.'),
+              fixed: ruler(
+                [[85.0, 90.0, 34.1, 69.7], [25.0, 25.0, 27.0, 25.7]],
+                [[1.0, 0.0, 0.0, 0.3], [79.0, 12.0, 5.0, 32.0], [3.0, 0.5, 1.3, 1.6], [99.0, 32.5, 8.0, 46.5]],
+                [['46.5', 'our mean'], ['+14.5', 'over NSA'], ['99.0 vs 25.0', 'single-needle against hybrid dense']],
+                'Eight times the training length with the training factor: hybrid dense falls to 25.0 on single-needle.')
+            } },
+            { label: 'LongBench (16K)', columns: longbench, lastIsAverage: true,
+              groups: [
+                { label: 'Dense', rows: [
+                  { name: 'Full dense', values: [29.1, 36.0, 53.7, 60.1, 47.1, 38.8, 5.1, 22.8, 4.7, 42.9, 73.5, 91.2, 2.0, 99.5, 47.9, 53.8, 44.3] },
+                  { name: 'Hybrid dense', values: [25.4, 37.1, 48.5, 59.3, 40.6, 39.2, 8.7, 24.9, 1.5, 35.7, 72.0, 88.7, 2.0, 96.3, 46.2, 55.7, 42.6] }
+                ] },
+                { label: 'Sparse, matched key budget', rank: true, rows: [
+                  { name: 'SWA', values: [18.0, 20.8, 26.4, 28.3, 28.1, 12.8, 19.8, 20.7, 13.7, 41.9, 64.0, 86.2, 1.7, 14.5, 45.8, 50.8, 30.9] },
+                  { name: 'NSA', values: [13.1, 16.2, 28.3, 22.6, 20.6, 10.8, 16.2, 20.6, 17.0, 38.9, 60.0, 79.5, 0.3, 0.5, 38.6, 41.9, 26.6] },
+                  { name: 'DSA', values: [18.1, 17.3, 28.3, 20.4, 22.7, 13.3, 15.2, 16.5, 14.0, 34.2, 61.0, 74.8, 2.1, 4.4, 33.4, 36.9, 25.8] },
+                  { name: 'Ours', ours: true, values: [10.4, 14.8, 17.7, 24.3, 26.3, 10.1, 13.4, 18.4, 17.2, 35.0, 62.0, 70.6, 0.8, 5.6, 37.6, 42.6, 25.4] }
+                ] }
+              ],
+              summary: [['25.4', 'our mean'], ['30.9', 'SWA, the best sparse model here'], ['44.3', 'full dense']],
+              caption: 'LongBench-v1 at the 16K training length. The ranking of the sparse models reverses: most tasks need coverage of the whole document.'
+            }
+          ]
+        },
+        ablation: {
+          tabs: [
+            { label: 'Components', columns: ['16K', '32K', '64K', '128K'], rowHeader: 'Variant',
+              note: 'mean of the three probes · YaRN scaled to length',
+              groups: [{ rank: true, rows: [
+                { name: 'Ours', ours: true, values: [53.8, 54.7, 52.3, 47.7] },
+                { name: 'Mean summary instead of attention pool', values: [49.9, 43.3, 40.3, 35.0] },
+                { name: 'No entropy prior', values: [40.7, 38.8, 37.3, 27.1] },
+                { name: 'No query residual', values: [27.2, 19.1, 12.9, 6.3] },
+                { name: 'No role offset', values: [11.5, 9.0, 6.0, 4.8] }
+              ] }],
+              caption: 'Each row removes one piece. The role offset is what marks the mask as a routing slot: without it the mean falls to 11.5 at 16K.'
+            },
+            { label: 'Routing token', columns: ['16K', '32K', '64K', '128K'], rowHeader: 'Token in the routing slot',
+              note: 'mean of the three probes · YaRN scaled to length',
+              groups: [{ rank: true, rows: [
+                { name: 'Native mask (ours)', ours: true, values: [53.8, 54.7, 52.3, 47.7] },
+                { name: 'New learned token', values: [41.3, 40.1, 40.1, 31.0] },
+                { name: 'EOS', values: [10.0, 4.6, 4.1, null] }
+              ] }],
+              caption: 'The same recipe with another token in the routing slot. The 128K run with EOS was not run.'
+            }
+          ]
+        }
+      } };
+    })();
+  </script>
+  <script src="../static/js/site.js?v=2"></script>
+</body>
+</html>
