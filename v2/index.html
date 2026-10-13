@@ -55,10 +55,10 @@
           <div class="visual-shell">
             <div class="window-bar" aria-hidden="true">
               <span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span>
-              <span class="window-label">mean accuracy on three RULER probes</span>
+              <span class="window-label">mean accuracy on three RULER tasks</span>
             </div>
             <figure>
-              <img src="../static/images/v2/mean-accuracy.png" alt="Mean accuracy of SWA, DSA, NSA and ours on three RULER probes at 16K, 32K, 64K and 128K context">
+              <img src="../static/images/v2/mean-accuracy.png" alt="Mean accuracy of SWA, DSA, NSA and ours on three RULER tasks at 16K, 32K, 64K and 128K context">
               <figcaption class="visual-caption"><strong>Ahead of the other sparse methods at every length.</strong> Mean accuracy over single-needle, multi-key and variable tracking, with the YaRN factor scaled to the evaluation length.</figcaption>
             </figure>
           </div>
@@ -143,7 +143,7 @@
 
         <div class="feature-grid">
           <article class="feature-card card reveal"><span class="feature-index">/ 01</span><h3>Routing mask</h3><p>The mask at the end of a chunk keeps its embedding and gets one learned offset at the input. Its query runs a softmax over the chunk's content keys, and the weighted sum is the chunk summary.</p><p class="formula">s<sub>c</sub> = Σ<sub>j</sub> α<sub>c,j</sub> k<sub>j</sub></p></article>
-          <article class="feature-card card reveal"><span class="feature-index">/ 02</span><h3>Top-K selection</h3><p>A rank-64 residual calibrates the scoring query. The score of a chunk is the query's agreement with its summary plus the entropy of the pooling weights; query heads that share a key head choose chunks together.</p><p class="formula">u<sub>i,c</sub> = q̂<sub>i</sub>ᵀs<sub>c</sub>/√d + H(α<sub>c</sub>)</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ 02</span><h3>Top-K selection</h3><p>A rank-64 residual calibrates the scoring query. The score of a chunk is the similarity between the query and its summary plus the entropy of the pooling weights; query heads that share a key head choose chunks together.</p><p class="formula">u<sub>i,c</sub> = q̂<sub>i</sub>ᵀs<sub>c</sub>/√d + H(α<sub>c</sub>)</p></article>
           <article class="feature-card card reveal"><span class="feature-index">/ 03</span><h3>Attention mass</h3><p>The scores of the selected chunks and the log-sum-exp of the local window are normalized in one partition. A second softmax spreads each chunk's share over its content tokens.</p><p class="formula">o<sub>i</sub> = Σ<sub>c</sub> w<sub>i,c</sub> Σ<sub>j</sub> a<sub>i,j</sub> v<sub>j</sub> + w<sub>i</sub><sup>loc</sup> o<sub>i</sub><sup>loc</sup></p></article>
         </div>
 
@@ -174,7 +174,7 @@
             <p class="section-kicker">03 · Results</p>
             <h2 class="section-title">Trained at 16K, still routing at 128K.</h2>
           </div>
-          <p class="section-intro">Three RULER probes, 100 examples each. Pick a length, and whether the YaRN factor is scaled to that length or held at the training value of 8. The underline marks the best sparse model.</p>
+          <p class="section-intro">Three RULER task families, 100 examples each, produced by our own generator rather than the official release; the decoder is given the length of the gold answer. Pick a length, and whether the YaRN factor is scaled to that length or held at the training value of 8. The underline marks the best sparse model.</p>
         </div>
 
         <div class="table-shell card reveal" data-table="ruler">
@@ -188,8 +188,8 @@
         </div>
 
         <div class="feature-grid two">
-          <article class="feature-card card reveal"><span class="feature-index">/ where it wins</span><h3>Localized evidence</h3><p>The margin is carried by single-needle retrieval: 100.0, 99.0, 98.0 and 95.0 from 16K to 128K, against 81.0, 87.0, 86.0 and 83.0 for NSA. With the factor held at 8 it stays at 99.0 or above while full dense falls to 94.0 at 64K.</p></article>
-          <article class="feature-card card reveal"><span class="feature-index">/ where it does not</span><h3>Scattered evidence and coverage</h3><p>Multi-key and variable tracking stay far below full dense, because one missed chunk fails the example. On LongBench the order reverses: the all-window model averages 30.9, ours 25.4, full dense 44.3. A wide window beats a few selected chunks when most of the document matters.</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ where it wins</span><h3>Localized evidence</h3><p>Single-needle retrieval is 100.0, 99.0, 98.0 and 95.0 from 16K to 128K, against 81.0, 87.0, 86.0 and 83.0 for NSA; it contributes most of the margin at 16K and 128K, and multi-key retrieval contributes most of it at 32K and 64K. With the factor held at 8 it stays at 99.0 or above while full dense falls to 94.0 at 64K.</p></article>
+          <article class="feature-card card reveal"><span class="feature-index">/ where it does not</span><h3>Scattered evidence and coverage</h3><p>Multi-key and variable tracking stay far below full dense, because missing one chunk is enough to get an example wrong. On LongBench the order reverses: the all-window model averages 30.9, ours 25.4, full dense 44.3. A wide window beats a few selected chunks when most of the document matters.</p></article>
         </div>
       </div>
     </section>
@@ -314,6 +314,7 @@
   <footer class="footer">
     <div class="footer-inner">
       <span>Prefilling-dLLM v2 · learned routing for long contexts</span>
+      <span>Powered by <a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener noreferrer">SGLang</a></span>
       <span><a href="../">v1</a> · <a href="#results">Results</a></span>
     </div>
   </footer>
@@ -409,24 +410,24 @@
         ablation: {
           tabs: [
             { label: 'Components', columns: ['16K', '32K', '64K', '128K'], rowHeader: 'Variant',
-              note: 'mean of the three probes · YaRN scaled to length',
+              note: 'mean of the three tasks · YaRN factor fixed at 8',
               groups: [{ rank: true, rows: [
-                { name: 'Ours', ours: true, values: [53.8, 54.7, 52.3, 47.7] },
-                { name: 'Mean summary instead of attention pool', values: [49.9, 43.3, 40.3, 35.0] },
-                { name: 'No entropy prior', values: [40.7, 38.8, 37.3, 27.1] },
-                { name: 'No query residual', values: [27.2, 19.1, 12.9, 6.3] },
-                { name: 'No role offset', values: [11.5, 9.0, 6.0, 4.8] }
+                { name: 'Ours', ours: true, values: [53.8, 50.7, 48.0, 46.5] },
+                { name: 'Mean summary instead of attention pool', values: [56.5, 56.6, 52.1, 35.9] },
+                { name: 'No entropy prior', values: [40.7, 38.8, 37.3, 27.3] },
+                { name: 'No role offset', values: [40.5, 39.7, 41.3, 37.3] },
+                { name: 'No query residual', values: [26.0, 19.1, 12.9, 9.1] }
               ] }],
-              caption: 'Each row removes one piece. The role offset is what marks the mask as a routing slot: without it the mean falls to 11.5 at 16K.'
+              caption: 'Each row removes one piece. Removing the query residual costs the most. The mean summary is higher through 64K and falls behind at 128K.'
             },
             { label: 'Routing token', columns: ['16K', '32K', '64K', '128K'], rowHeader: 'Token in the routing slot',
-              note: 'mean of the three probes · YaRN scaled to length',
+              note: 'mean of the three tasks · YaRN factor fixed at 8',
               groups: [{ rank: true, rows: [
-                { name: 'Native mask (ours)', ours: true, values: [53.8, 54.7, 52.3, 47.7] },
-                { name: 'New learned token', values: [41.3, 40.1, 40.1, 31.0] },
-                { name: 'EOS', values: [10.0, 4.6, 4.1, null] }
+                { name: 'Native mask (ours)', ours: true, values: [53.8, 50.7, 48.0, 46.5] },
+                { name: 'New learned token', values: [38.9, 37.9, 39.9, 30.7] },
+                { name: 'EOS', values: [37.5, 36.2, 31.8, 22.8] }
               ] }],
-              caption: 'The same recipe with another token in the routing slot. The 128K run with EOS was not run.'
+              caption: 'The same recipe with another token in the routing slot, in training and at evaluation. Both replacements lose most multi-key retrieval.'
             }
           ]
         }
